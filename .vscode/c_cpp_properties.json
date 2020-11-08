@@ -1,0 +1,26 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "/home/ruedi/Arduino/libraries/Adafruit_LiquidCrystal",
+                "/home/ruedi/Arduino/libraries/U8g2/src",
+                "/home/ruedi/Arduino/libraries/Adafruit_SSD1306",
+                "/home/ruedi/Arduino/libraries/Adafruit_SH1106",
+                "/home/ruedi/Arduino/libraries/**",
+                "/home/ruedi/arduino-1.8.13/tools/**",
+                "/home/ruedi/arduino-1.8.13/hardware/tools/avr/avr/include/**",
+                "/home/ruedi/arduino-1.8.13/hardware/arduino/avr/**"
+            ],
+            "forcedInclude": [
+                "/home/ruedi/arduino-1.8.13/hardware/arduino/avr/cores/arduino/Arduino.h"
+            ],
+            "defines": ["__AVR_ATmega328P__","__AVR_DEVICE_NAME__=atmega328p"],
+            "intelliSenseMode": "gcc-x64",
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "gnu11",
+            "cppStandard": "gnu++14"
+        }
+    ],
+    "version": 4
+}
