@@ -3,23 +3,41 @@
 const int rs = 12, en = 13, d4 = 11, d5 = 10, d6 = 9, d7 = 8;
 LiquidCrystal lcd(rs, en, d4, d5, d6, d7);
 
-const int PIN_R0 = 2;
-const int PIN_R1 = 3;
-const int PIN_R2 = 4;
-const int PIN_Rmask = (1 << PIN_R0) | (1 << PIN_R1) | (1 << PIN_R2);
-const int PIN_L = 4;
+const int PIN_L = 7;
 
 const uint8_t PIN_analog_rc = A0;
 const uint8_t PIN_analog_l = A1;
 
-const float valueR0 = 390.;
-const float valueR1 = 10. * 1000;
-const float valueR2 = 100. * 1000;
 
 const uint16_t LIMIT_LOW_VALUE = 5;
 const uint16_t LIMIT_HIGH_VALUE = 1010;
 const uint16_t MAX_RC_VALUE = 1014;
-const unsigned long displayDelay = 2000;
+const unsigned long displayDelay = 200;
+
+
+struct CRPinInfo
+{
+  float valueR;
+  uint8_t index;
+  uint8_t pin;
+  CRPinInfo(uint8_t index, uint8_t pin, float valueR)
+  {
+    this->index = index;
+    this->pin = pin;
+    this->valueR = valueR;
+  }
+};
+
+CRPinInfo crPinInfos[] = {
+    CRPinInfo(0, 2, 390.),
+    CRPinInfo(1, 3, 10. * 1000),
+    CRPinInfo(2, 4, 100. * 1000),
+    CRPinInfo(3, 5, 750. * 1000)
+    };
+
+const int PIN_Rmask = (1 << 2) | (1 << 3) | (1 << 4)| (1 << 5);
+
+const uint8_t crPinInfoSize = 4;
 
 void setup()
 {
@@ -75,6 +93,7 @@ void printWithSiPrefix(float value)
   }
 }
 
+
 uint16_t timerBase;
 boolean inputCaptured;
 uint32_t capturedValue;
@@ -91,7 +110,7 @@ boolean startCMeasurement(uint8_t pin)
   DDRD &= ~PIN_Rmask;  // make r pins inputs
 
   // discharge
-  DDRD |= (1 << PIN_R0); // set r0 output
+  DDRD |= (1 << crPinInfos[0].pin); // set r0 output
   enableAdc();
   {
     auto start = millis();
@@ -112,7 +131,7 @@ boolean startCMeasurement(uint8_t pin)
   TCCR1A = 0;
   TCCR1B =
       // (0 << ICES1) |  // rising edge to capture
-      (1 << CS11); // /8 prescaler
+      (1 << CS10); // /1 prescaler
   TIMSK1 =
       (1 << ICIE1)    // capture interrupt enable
       | (1 << TOIE1); // overflow interrupt
@@ -150,25 +169,48 @@ uint16_t measureRValue()
   }
 }
 
-void calculateAndPrintR(uint16_t value, float valueR)
+boolean calculateAndPrintR(uint16_t value, struct CRPinInfo &pinInfo)
 {
   // valueR/(MAX_RC_VALUE-value) = R / value
+  // R=valueR*value/(MAX_RC_VALUE-value)
   float divisor = (float)MAX_RC_VALUE - value;
   if (divisor < 1)
   {
     lcd.clear();
     lcd.print("R: out of range");
     delay(displayDelay);
-    return;
+    return true;
   }
-  float R = valueR * value / divisor;
+
+  float ratio = value / divisor;
+
+  // check if next pin would make more sense
+  if (pinInfo.index < crPinInfoSize - 1 && ratio > 1)
+  {
+    float nextValue = MAX_RC_VALUE - divisor * crPinInfos[pinInfo.index + 1].valueR / pinInfo.valueR;
+    float nextDivisor = MAX_RC_VALUE - nextValue;
+    if (nextDivisor > 1)
+    {
+      float nextRatio;
+      if (nextValue > nextDivisor)
+        nextRatio = nextValue / nextDivisor;
+      else
+        nextRatio = nextDivisor / nextValue;
+      if (nextRatio < ratio)
+        return false;
+    }
+  }
+
+  float R = pinInfo.valueR * ratio;
 
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("V: ");
   lcd.print(value);
-  lcd.print(" ");
-  lcd.print((uint32_t)valueR);
+
+  lcd.setCursor(14, 0);
+  lcd.print("R");
+  lcd.print(pinInfo.index);
 
   lcd.setCursor(0, 1);
   lcd.print("R: ");
@@ -176,18 +218,23 @@ void calculateAndPrintR(uint16_t value, float valueR)
   lcd.print(" Ohm");
 
   delay(displayDelay);
+  return true;
 }
 
-void calculateAndPrintC(float time, float valueR)
+void calculateAndPrintC(float time, struct CRPinInfo &pinInfo)
 {
   float tau = time / 0.7;
-  float c = tau / valueR;
+  float c = tau / pinInfo.valueR;
 
   lcd.clear();
   lcd.setCursor(0, 0);
   lcd.print("T: ");
   printWithSiPrefix(time);
   lcd.print("s");
+
+  lcd.setCursor(14, 0);
+  lcd.print("R");
+  lcd.print(pinInfo.index);
 
   lcd.setCursor(0, 1);
   lcd.print("C: ");
@@ -226,14 +273,13 @@ Algorithm: Start with low R, proceed with middle/higher R
 
 */
 
-boolean measureC(uint8_t pin, float valueR)
+boolean measureC(struct CRPinInfo &pinInfo)
 {
-  if (!startCMeasurement(pin))
+  if (!startCMeasurement(pinInfo.pin))
   {
     // unable to discharge, there seems to be a resistor
     auto value = measureRValue();
-    calculateAndPrintR(value, valueR);
-    return true;
+    return calculateAndPrintR(value, pinInfo);
   }
 
   auto startTime = millis();
@@ -241,20 +287,30 @@ boolean measureC(uint8_t pin, float valueR)
   {
     if (inputCaptured)
     {
-      float time = capturedValue * (1. / 2) * 1.e-6;
+      float time = capturedValue * (1. / 16) * 1.e-6;
       auto value = measureRValue();
+
       if (value > LIMIT_HIGH_VALUE)
       {
-        if (time < 10e-6)
+        // raise all the way to the high value, either a capacitor or a high R
+        boolean wasFastRaise;
+        if (pinInfo.index < crPinInfoSize - 1)
+          wasFastRaise = time < 1e-3;
+        else
+          // for last R, accept slower raises as well
+          wasFastRaise = time < 30e-6;
+
+        if (wasFastRaise)
+          // high R or low C, try larger resistor
           return false;
-        calculateAndPrintC(time, valueR);
+        calculateAndPrintC(time, pinInfo);
         return true;
       }
 
-      if (time < 10e-6)
+      // we got stuck in the middle
+      if (time < 1e-3)
       {
-        calculateAndPrintR(value, valueR);
-        return true;
+        return calculateAndPrintR(value, pinInfo);
       }
 
       lcd.clear();
@@ -274,20 +330,19 @@ boolean measureC(uint8_t pin, float valueR)
         return true;
       }
 
-      calculateAndPrintR(value, valueR);
-      return true;
+      return calculateAndPrintR(value, pinInfo);
     }
   }
 }
 
 boolean measureC()
 {
-  if (measureC(PIN_R0, valueR0))
-    return true;
-  if (measureC(PIN_R1, valueR1))
-    return true;
-  if (measureC(PIN_R2, valueR2))
-    return true;
+  for (uint8_t i = 0; i < crPinInfoSize; i++)
+  {
+    if (measureC(crPinInfos[i]))
+      return true;
+  }
+
   return false;
 }
 
