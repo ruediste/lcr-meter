@@ -8,12 +8,10 @@ const int PIN_L = 7;
 const uint8_t PIN_analog_rc = A0;
 const uint8_t PIN_analog_l = A1;
 
-
 const uint16_t LIMIT_LOW_VALUE = 5;
 const uint16_t LIMIT_HIGH_VALUE = 1010;
 const uint16_t MAX_RC_VALUE = 1014;
 const unsigned long displayDelay = 200;
-
 
 struct CRPinInfo
 {
@@ -32,10 +30,9 @@ CRPinInfo crPinInfos[] = {
     CRPinInfo(0, 2, 390.),
     CRPinInfo(1, 3, 10. * 1000),
     CRPinInfo(2, 4, 100. * 1000),
-    CRPinInfo(3, 5, 750. * 1000)
-    };
+    CRPinInfo(3, 5, 750. * 1000)};
 
-const int PIN_Rmask = (1 << 2) | (1 << 3) | (1 << 4)| (1 << 5);
+const int PIN_Rmask = (1 << 2) | (1 << 3) | (1 << 4) | (1 << 5);
 
 const uint8_t crPinInfoSize = 4;
 
@@ -93,10 +90,11 @@ void printWithSiPrefix(float value)
   }
 }
 
-
 uint16_t timerBase;
-boolean inputCaptured;
-uint32_t capturedValue;
+
+uint8_t capturedValuesCount;
+const uint8_t capturedValuesSize = 2;
+uint32_t capturedValues[capturedValuesSize];
 
 void enableAdc()
 {
@@ -129,9 +127,7 @@ boolean startCMeasurement(uint8_t pin)
   noInterrupts();
   // setup timer 1
   TCCR1A = 0;
-  TCCR1B =
-      // (0 << ICES1) |  // rising edge to capture
-      (1 << CS10); // /1 prescaler
+  TCCR1B = (1 << CS10); // /1 prescaler
   TIMSK1 =
       (1 << ICIE1)    // capture interrupt enable
       | (1 << TOIE1); // overflow interrupt
@@ -143,7 +139,7 @@ boolean startCMeasurement(uint8_t pin)
   ACSR = (1 << ACIC); // enable input capture in T1
 
   // reset timer
-  inputCaptured = false;
+  capturedValuesCount = 0;
   timerBase = 0;
   TIFR1 = (1 << ICF1) | (1 << TOV1);
   TCNT1 = 0;
@@ -215,7 +211,7 @@ boolean calculateAndPrintR(uint16_t value, struct CRPinInfo &pinInfo)
   lcd.setCursor(0, 1);
   lcd.print("R: ");
   printWithSiPrefix(R);
-  lcd.print(" Ohm");
+  lcd.print("Ohm");
 
   delay(displayDelay);
   return true;
@@ -285,9 +281,9 @@ boolean measureC(struct CRPinInfo &pinInfo)
   auto startTime = millis();
   while (true)
   {
-    if (inputCaptured)
+    if (capturedValuesCount > 0)
     {
-      float time = capturedValue * (1. / 16) * 1.e-6;
+      float time = capturedValues[0] * (1. / 16) * 1.e-6;
       auto value = measureRValue();
 
       if (value > LIMIT_HIGH_VALUE)
@@ -318,7 +314,7 @@ boolean measureC(struct CRPinInfo &pinInfo)
       delay(displayDelay);
       return true;
     }
-    if ((millis() - startTime) > 1000)
+    if ((millis() - startTime) > 500)
     {
       // timeout
       auto value = measureRValue();
@@ -346,9 +342,79 @@ boolean measureC()
   return false;
 }
 
+void startLMeasurement()
+{
+  // initialize
+  PORTD &= ~(1 << PIN_L); // set L pin to 0
+  DDRD |= (1 << PIN_L);   // make L pin output
+
+  // wait for C to load
+  delay(100);
+
+  noInterrupts();
+  // setup timer 1
+  TCCR1A = 0;
+  TCCR1B = (1 << CS10); // /1 prescaler
+  TIMSK1 =
+      (1 << ICIE1)    // capture interrupt enable
+      | (1 << TOIE1); // overflow interrupt
+
+  // setup Ananalog Comparator: plus: ain0, minus: ADC1, input capture
+  ADCSRB |= (1 << ACME);  // enable multiplexer
+  ADCSRA &= ~(1 << ADEN); // disable ADC
+  ADMUX = (ADMUX & ~0b1111) | 1;
+  ACSR = (1 << ACIC); // enable input capture in T1
+
+  // reset timer
+  capturedValuesCount = 0;
+  timerBase = 0;
+  TIFR1 = (1 << ICF1) | (1 << TOV1); // clear interrupt flags
+  TCNT1 = 0;                         // set counter to 0
+
+  PORTD |= (1 << PIN_L); // set output to high, causing the LC circuit to oscillate
+  interrupts();
+}
+
+boolean measureL()
+{
+  startLMeasurement();
+  auto startTime = millis();
+  while (true)
+  {
+    if (capturedValuesCount >= 2)
+    {
+      // two values captured, calculate L
+      float time = (capturedValues[1] - capturedValues[0]) * (1. / 16) * 1e-6;
+      float f = 1 / time;
+      // f=1/(2*PI*sqrt(L*C))
+      // L*C=1/(2*PI*f)^2
+      // L=1/(4*PI^2*f^2*C)
+      float C = 2.2e-9;
+      float L = 1 / (4 * PI * PI * f * f * C);
+
+      lcd.clear();
+      lcd.print("T: ");
+      printWithSiPrefix(time);
+      lcd.print("s");
+
+      lcd.setCursor(0, 1);
+      lcd.print("L: ");
+      printWithSiPrefix(L);
+      lcd.print("F");
+      return true;
+    }
+    if ((millis() - startTime) > 500)
+    {
+      // timeout
+      return false;
+    }
+  }
+}
 void loop()
 {
   if (measureC())
+    return;
+  if (measureL())
     return;
   lcd.clear();
   lcd.print("not connected");
@@ -361,12 +427,14 @@ ISR(TIMER1_OVF_vect)
 
 ISR(TIMER1_CAPT_vect)
 {
-  TIMSK1 &= ~(1 << ICIE1); // capture interrupt disabled
-  capturedValue = (((uint32_t)timerBase) << 16) | ICR1;
-  // if (ICR1 < 0x8000 && ((TIFR1 & (1 << TOV1)) != 0))
+  if (capturedValuesCount < capturedValuesSize)
   {
-    // low capture value and overflow still set, timer overflow has not been handled yet
-    // capturedValue += ((uint32_t)1 << 16);
+    uint32_t capturedValue = (((uint32_t)timerBase) << 16) | ICR1;
+    if (ICR1 < 0x8000 && ((TIFR1 & (1 << TOV1)) != 0))
+    {
+      // low capture value and overflow still set, timer overflow has not been handled yet
+      capturedValue += ((uint32_t)1 << 16);
+    }
+    capturedValues[capturedValuesCount++] = capturedValue;
   }
-  inputCaptured = true;
 }
